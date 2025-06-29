@@ -1,0 +1,26 @@
+{
+  "name": "owl-factory",
+  "version": "1.0.0",
+  "description": "AI-powered video content analysis platform with GPU cluster management",
+  "main": "index.js",
+  "scripts": {
+    "dev": "cd 前端页面 && npm run dev",
+    "build": "cd 前端页面 && npm run build",
+    "start": "cd 后端程序 && python main.py",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ai",
+    "video-analysis",
+    "gpu-cluster",
+    "fastapi",
+    "react",
+    "typescript"
+  ],
+  "author": "ft54482",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ft54482/owl-factory.git"
+  }
+}
