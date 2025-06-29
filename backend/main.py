@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 🦉 猫头鹰工厂 - 后台管理系统主应用
 基于FastAPI + Supabase的完整后端解决方案
@@ -98,106 +98,59 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
-# 添加可信主机中间件
+# 添加受信任主机中间件
 app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=["localhost", "127.0.0.1", "*.your-domain.com"]
 )
 
 # 全局异常处理
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    """HTTP异常处理"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "success": False,
-            "message": exc.detail,
-            "status_code": exc.status_code
-        }
-    )
-
 @app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    """通用异常处理"""
-    logger.error(f"❌ 未处理的异常: {exc}")
+async def global_exception_handler(request, exc):
+    logger.error(f"全局异常: {exc}")
     return JSONResponse(
         status_code=500,
-        content={
-            "success": False,
-            "message": "服务器内部错误",
-            "status_code": 500
-        }
+        content={"detail": "服务器内部错误"}
     )
 
-# 根路由
-@app.get("/")
-async def root():
-    """根路径"""
-    return {
-        "message": "🦉 猫头鹰工厂后台管理系统",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs"
-    }
-
-# 健康检查
+# 健康检查端点
 @app.get("/health")
 async def health_check():
-    """健康检查"""
-    try:
-        # 测试Supabase连接
-        supabase_status = supabase_manager.test_connection()
-        
-        return {
-            "status": "healthy",
-            "timestamp": str(datetime.utcnow()),
-            "services": {
-                "supabase": "connected" if supabase_status else "disconnected",
-                "api": "running"
-            }
-        }
-    except Exception as e:
-        logger.error(f"❌ 健康检查失败: {e}")
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "unhealthy",
-                "error": str(e)
-            }
-        )
-
-# 系统信息
-@app.get("/info")
-async def system_info():
-    """系统信息"""
+    """健康检查端点"""
     return {
-        "app_name": settings.app_name,
-        "app_version": settings.app_version,
-        "debug": settings.debug,
-        "environment": "development" if settings.debug else "production"
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0",
+        "service": "猫头鹰工厂后台管理系统"
+    }
+
+# 根端点
+@app.get("/")
+async def root():
+    """根端点"""
+    return {
+        "message": "🦉 欢迎使用猫头鹰工厂后台管理系统",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health"
     }
 
 # 注册API路由
 app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
 app.include_router(user_router, prefix="/api/users", tags=["用户管理"])
 app.include_router(recharge_router, prefix="/api/recharge", tags=["充值管理"])
-app.include_router(gpu_router, prefix="/api/gpu", tags=["GPU监控"])
-app.include_router(admin_router, prefix="/api/admin", tags=["系统管理"])
+app.include_router(gpu_router, prefix="/api/gpu", tags=["GPU管理"])
+app.include_router(admin_router, prefix="/api/admin", tags=["管理员"])
 app.include_router(log_router, prefix="/api/logs", tags=["日志管理"])
 
-# 导出依赖函数供路由使用
-__all__ = ["app", "get_current_user", "get_admin_user"]
-
 if __name__ == "__main__":
-    # 开发环境运行
     uvicorn.run(
         "main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=settings.debug,
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
         log_level="info"
     )
