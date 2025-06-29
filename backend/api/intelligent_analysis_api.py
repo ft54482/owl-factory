@@ -1,344 +1,472 @@
-# -*- coding: utf-8 -*-
-"""
-🦉 猫头鹰工厂智能分析API
-========================
+# 智能分析API - 猫头鹰工厂核心分析服务
+# 提供单视频分析和完整账号分析功能
 
-提供两种分析模式的API端点：
-1. POST /api/analysis/single-video - 单视频分析
-2. POST /api/analysis/complete-account - 完整账号分析
-3. GET /api/analysis/status/{task_id} - 获取任务状态
-4. GET /api/analysis/result/{task_id} - 获取分析结果
-
-技术栈：
-- FastAPI: 高性能异步API框架
-- Pydantic: 数据验证和序列化
-- 智能工作流处理器: 核心分析引擎
-
-Created by: 猫头鹰工厂AI团队
-"""
-
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from pydantic import BaseModel, HttpUrl
+from typing import List, Optional, Dict, Any
 import asyncio
-import logging
+import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl, validator
-import uvicorn
+import json
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# 导入依赖服务
+from ..middleware.supabase_auth import get_current_user
+from ..services.gpu_monitor_service import GPUMonitorService
+from ..config.supabase_config import get_supabase_client
 
-# 创建FastAPI应用
-app = FastAPI(
-    title="猫头鹰工厂智能分析API",
-    description="基于AI的智能视频内容分析平台API",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-# 添加CORS中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该限制具体域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+router = APIRouter(prefix="/api/analysis", tags=["智能分析"])
 
 # 数据模型定义
 class VideoAnalysisRequest(BaseModel):
     """单视频分析请求模型"""
     video_url: HttpUrl
-    analysis_type: str = "standard"
-    custom_prompts: Optional[List[str]] = None
-    
-    @validator('analysis_type')
-    def validate_analysis_type(cls, v):
-        allowed_types = ['standard', 'detailed', 'custom']
-        if v not in allowed_types:
-            raise ValueError(f'分析类型必须是: {", ".join(allowed_types)}')
-        return v
+    platform: str  # 平台类型：douyin, xiaohongshu, bilibili, tiktok
+    analysis_type: str = "standard"  # 分析类型：standard, deep, quick
+    options: Optional[Dict[str, Any]] = None
 
 class AccountAnalysisRequest(BaseModel):
     """完整账号分析请求模型"""
     account_url: HttpUrl
-    analysis_depth: str = "standard"
-    include_comments: bool = True
-    max_videos: int = 50
-    
-    @validator('analysis_depth')
-    def validate_analysis_depth(cls, v):
-        allowed_depths = ['basic', 'standard', 'comprehensive']
-        if v not in allowed_depths:
-            raise ValueError(f'分析深度必须是: {", ".join(allowed_depths)}')
-        return v
-    
-    @validator('max_videos')
-    def validate_max_videos(cls, v):
-        if v < 1 or v > 100:
-            raise ValueError('视频数量必须在1-100之间')
-        return v
+    platform: str
+    analysis_depth: str = "complete"  # 分析深度：complete, recent, sample
+    video_limit: Optional[int] = None  # 视频数量限制
+    options: Optional[Dict[str, Any]] = None
 
-class TaskResponse(BaseModel):
-    """任务响应模型"""
+class AnalysisResponse(BaseModel):
+    """分析响应模型"""
     task_id: str
-    status: str
+    status: str  # pending, processing, completed, failed
     message: str
     estimated_time: Optional[int] = None  # 预估完成时间（秒）
-
-class TaskStatusResponse(BaseModel):
-    """任务状态响应模型"""
-    task_id: str
-    status: str
-    progress: float  # 0-100
-    current_step: str
-    estimated_remaining: Optional[int] = None
-    error_message: Optional[str] = None
 
 class AnalysisResult(BaseModel):
     """分析结果模型"""
     task_id: str
-    analysis_type: str
-    results: Dict[str, Any]
-    metadata: Dict[str, Any]
+    status: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
     created_at: datetime
-    completed_at: datetime
+    completed_at: Optional[datetime] = None
+    processing_time: Optional[float] = None
 
-# 全局任务存储（生产环境应使用数据库）
-tasks_storage: Dict[str, Dict[str, Any]] = {}
+# 全局任务存储（生产环境应使用Redis或数据库）
+analysis_tasks = {}
 
-@app.get("/")
-async def root():
-    """API根端点"""
-    return {
-        "message": "猫头鹰工厂智能分析API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "single_video": "/api/analysis/single-video",
-            "complete_account": "/api/analysis/complete-account",
-            "task_status": "/api/analysis/status/{task_id}",
-            "task_result": "/api/analysis/result/{task_id}"
-        }
-    }
+# 平台检测器
+def detect_platform(url: str) -> str:
+    """检测URL所属平台"""
+    url_lower = url.lower()
+    if 'douyin.com' in url_lower or 'dy.com' in url_lower:
+        return 'douyin'
+    elif 'xiaohongshu.com' in url_lower or 'xhs.com' in url_lower:
+        return 'xiaohongshu'
+    elif 'bilibili.com' in url_lower or 'b23.tv' in url_lower:
+        return 'bilibili'
+    elif 'tiktok.com' in url_lower:
+        return 'tiktok'
+    else:
+        return 'unknown'
 
-@app.post("/api/analysis/single-video", response_model=TaskResponse)
+# URL类型检测器
+def detect_url_type(url: str) -> str:
+    """检测URL类型：video或profile"""
+    url_lower = url.lower()
+    # 视频URL特征
+    video_patterns = ['/video/', '/v/', '/play/', '/watch?v=', '/p/']
+    # 用户主页URL特征
+    profile_patterns = ['/user/', '/u/', '/profile/', '/channel/', '/@']
+    
+    for pattern in video_patterns:
+        if pattern in url_lower:
+            return 'video'
+    
+    for pattern in profile_patterns:
+        if pattern in url_lower:
+            return 'profile'
+    
+    return 'unknown'
+
+@router.post("/single-video", response_model=AnalysisResponse)
 async def analyze_single_video(
     request: VideoAnalysisRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
 ):
-    """单视频分析端点"""
+    """单视频分析接口"""
     try:
         # 生成任务ID
-        task_id = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hash(str(request.video_url)) % 10000}"
+        task_id = str(uuid.uuid4())
         
-        # 初始化任务状态
-        tasks_storage[task_id] = {
-            "status": "pending",
-            "progress": 0,
-            "current_step": "初始化任务",
-            "request": request.dict(),
-            "created_at": datetime.now(),
-            "type": "single_video"
+        # 验证平台
+        detected_platform = detect_platform(str(request.video_url))
+        if detected_platform == 'unknown':
+            raise HTTPException(status_code=400, detail="不支持的视频平台")
+        
+        # 验证URL类型
+        url_type = detect_url_type(str(request.video_url))
+        if url_type != 'video':
+            raise HTTPException(status_code=400, detail="请提供有效的视频URL")
+        
+        # 检查GPU资源
+        gpu_service = GPUMonitorService()
+        available_gpu = await gpu_service.get_available_gpu()
+        if not available_gpu:
+            raise HTTPException(status_code=503, detail="GPU资源暂时不可用，请稍后重试")
+        
+        # 创建任务记录
+        task_data = {
+            'task_id': task_id,
+            'user_id': current_user['id'],
+            'type': 'single_video',
+            'status': 'pending',
+            'video_url': str(request.video_url),
+            'platform': detected_platform,
+            'analysis_type': request.analysis_type,
+            'options': request.options or {},
+            'created_at': datetime.utcnow(),
+            'gpu_id': available_gpu['id']
         }
         
-        # 添加后台任务
-        background_tasks.add_task(process_single_video, task_id, request)
+        analysis_tasks[task_id] = task_data
         
-        logger.info(f"创建单视频分析任务: {task_id}")
+        # 启动后台分析任务
+        background_tasks.add_task(
+            process_single_video_analysis,
+            task_id,
+            task_data
+        )
         
-        return TaskResponse(
+        # 预估处理时间（基于分析类型）
+        time_estimates = {
+            'quick': 30,
+            'standard': 120,
+            'deep': 300
+        }
+        estimated_time = time_estimates.get(request.analysis_type, 120)
+        
+        return AnalysisResponse(
             task_id=task_id,
             status="pending",
-            message="任务已创建，正在处理中",
-            estimated_time=300  # 预估5分钟
+            message="视频分析任务已创建，正在处理中...",
+            estimated_time=estimated_time
         )
         
     except Exception as e:
-        logger.error(f"创建单视频分析任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"任务创建失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"创建分析任务失败: {str(e)}")
 
-@app.post("/api/analysis/complete-account", response_model=TaskResponse)
+@router.post("/complete-account", response_model=AnalysisResponse)
 async def analyze_complete_account(
     request: AccountAnalysisRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
 ):
-    """完整账号分析端点"""
+    """完整账号分析接口"""
     try:
         # 生成任务ID
-        task_id = f"account_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hash(str(request.account_url)) % 10000}"
+        task_id = str(uuid.uuid4())
         
-        # 初始化任务状态
-        tasks_storage[task_id] = {
-            "status": "pending",
-            "progress": 0,
-            "current_step": "初始化任务",
-            "request": request.dict(),
-            "created_at": datetime.now(),
-            "type": "complete_account"
+        # 验证平台
+        detected_platform = detect_platform(str(request.account_url))
+        if detected_platform == 'unknown':
+            raise HTTPException(status_code=400, detail="不支持的账号平台")
+        
+        # 验证URL类型
+        url_type = detect_url_type(str(request.account_url))
+        if url_type != 'profile':
+            raise HTTPException(status_code=400, detail="请提供有效的账号主页URL")
+        
+        # 检查GPU资源（账号分析需要更多资源）
+        gpu_service = GPUMonitorService()
+        available_gpus = await gpu_service.get_available_gpus(min_count=2)
+        if len(available_gpus) < 2:
+            raise HTTPException(status_code=503, detail="账号分析需要更多GPU资源，请稍后重试")
+        
+        # 创建任务记录
+        task_data = {
+            'task_id': task_id,
+            'user_id': current_user['id'],
+            'type': 'complete_account',
+            'status': 'pending',
+            'account_url': str(request.account_url),
+            'platform': detected_platform,
+            'analysis_depth': request.analysis_depth,
+            'video_limit': request.video_limit,
+            'options': request.options or {},
+            'created_at': datetime.utcnow(),
+            'gpu_ids': [gpu['id'] for gpu in available_gpus]
         }
         
-        # 添加后台任务
-        background_tasks.add_task(process_complete_account, task_id, request)
+        analysis_tasks[task_id] = task_data
         
-        logger.info(f"创建完整账号分析任务: {task_id}")
+        # 启动后台分析任务
+        background_tasks.add_task(
+            process_account_analysis,
+            task_id,
+            task_data
+        )
         
-        return TaskResponse(
+        # 预估处理时间（基于分析深度和视频数量）
+        base_time = {
+            'recent': 300,
+            'sample': 600,
+            'complete': 1800
+        }
+        estimated_time = base_time.get(request.analysis_depth, 600)
+        if request.video_limit:
+            estimated_time = min(estimated_time, request.video_limit * 30)
+        
+        return AnalysisResponse(
             task_id=task_id,
             status="pending",
-            message="任务已创建，正在处理中",
-            estimated_time=request.max_videos * 30  # 每个视频预估30秒
+            message="账号分析任务已创建，正在处理中...",
+            estimated_time=estimated_time
         )
         
     except Exception as e:
-        logger.error(f"创建完整账号分析任务失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"任务创建失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"创建分析任务失败: {str(e)}")
 
-@app.get("/api/analysis/status/{task_id}", response_model=TaskStatusResponse)
-async def get_task_status(task_id: str):
-    """获取任务状态"""
-    if task_id not in tasks_storage:
+@router.get("/status/{task_id}", response_model=AnalysisResult)
+async def get_analysis_status(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取分析任务状态"""
+    if task_id not in analysis_tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    task = tasks_storage[task_id]
+    task_data = analysis_tasks[task_id]
     
-    return TaskStatusResponse(
-        task_id=task_id,
-        status=task["status"],
-        progress=task["progress"],
-        current_step=task["current_step"],
-        estimated_remaining=task.get("estimated_remaining"),
-        error_message=task.get("error_message")
-    )
-
-@app.get("/api/analysis/result/{task_id}", response_model=AnalysisResult)
-async def get_task_result(task_id: str):
-    """获取分析结果"""
-    if task_id not in tasks_storage:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    task = tasks_storage[task_id]
-    
-    if task["status"] != "completed":
-        raise HTTPException(status_code=400, detail="任务尚未完成")
+    # 验证用户权限
+    if task_data['user_id'] != current_user['id'] and current_user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="无权访问此任务")
     
     return AnalysisResult(
         task_id=task_id,
-        analysis_type=task["type"],
-        results=task["results"],
-        metadata=task["metadata"],
-        created_at=task["created_at"],
-        completed_at=task["completed_at"]
+        status=task_data['status'],
+        result=task_data.get('result'),
+        error=task_data.get('error'),
+        created_at=task_data['created_at'],
+        completed_at=task_data.get('completed_at'),
+        processing_time=task_data.get('processing_time')
     )
 
-# 后台任务处理函数
-async def process_single_video(task_id: str, request: VideoAnalysisRequest):
+@router.get("/result/{task_id}")
+async def get_analysis_result(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取分析结果详情"""
+    if task_id not in analysis_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task_data = analysis_tasks[task_id]
+    
+    # 验证用户权限
+    if task_data['user_id'] != current_user['id'] and current_user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="无权访问此任务")
+    
+    if task_data['status'] != 'completed':
+        raise HTTPException(status_code=400, detail="任务尚未完成")
+    
+    return task_data.get('result', {})
+
+@router.get("/history")
+async def get_analysis_history(
+    page: int = 1,
+    limit: int = 20,
+    current_user: dict = Depends(get_current_user)
+):
+    """获取用户分析历史"""
+    user_tasks = [
+        task for task in analysis_tasks.values()
+        if task['user_id'] == current_user['id']
+    ]
+    
+    # 按创建时间倒序排列
+    user_tasks.sort(key=lambda x: x['created_at'], reverse=True)
+    
+    # 分页
+    start = (page - 1) * limit
+    end = start + limit
+    paginated_tasks = user_tasks[start:end]
+    
+    return {
+        'tasks': paginated_tasks,
+        'total': len(user_tasks),
+        'page': page,
+        'limit': limit,
+        'has_more': end < len(user_tasks)
+    }
+
+# 后台处理函数
+async def process_single_video_analysis(task_id: str, task_data: dict):
     """处理单视频分析任务"""
     try:
-        task = tasks_storage[task_id]
+        # 更新任务状态
+        analysis_tasks[task_id]['status'] = 'processing'
+        analysis_tasks[task_id]['started_at'] = datetime.utcnow()
         
-        # 模拟分析过程
-        steps = [
-            ("下载视频", 20),
-            ("提取音频", 40),
-            ("语音识别", 60),
-            ("内容分析", 80),
-            ("生成报告", 100)
-        ]
+        # 模拟分析过程（实际实现中会调用AI服务）
+        await asyncio.sleep(5)  # 模拟处理时间
         
-        for step_name, progress in steps:
-            task["current_step"] = step_name
-            task["progress"] = progress
-            task["status"] = "processing"
-            
-            # 模拟处理时间
-            await asyncio.sleep(2)
-        
-        # 完成任务
-        task["status"] = "completed"
-        task["completed_at"] = datetime.now()
-        task["results"] = {
-            "video_url": str(request.video_url),
-            "analysis_summary": "这是一个示例分析结果",
-            "key_points": ["要点1", "要点2", "要点3"],
-            "sentiment": "positive",
-            "topics": ["科技", "教育", "娱乐"]
+        # 模拟分析结果
+        result = {
+            'video_info': {
+                'title': '示例视频标题',
+                'duration': 120,
+                'platform': task_data['platform'],
+                'url': task_data['video_url']
+            },
+            'transcript': {
+                'text': '这是视频的转录文本...',
+                'segments': [
+                    {'start': 0, 'end': 10, 'text': '开头部分'},
+                    {'start': 10, 'end': 20, 'text': '中间部分'}
+                ]
+            },
+            'analysis': {
+                'sentiment': 'positive',
+                'topics': ['科技', '教育'],
+                'keywords': ['AI', '机器学习', '深度学习'],
+                'summary': '这是一个关于AI技术的教育视频...'
+            },
+            'metrics': {
+                'engagement_score': 8.5,
+                'content_quality': 9.0,
+                'educational_value': 8.8
+            }
         }
-        task["metadata"] = {
-            "processing_time": (task["completed_at"] - task["created_at"]).total_seconds(),
-            "analysis_type": request.analysis_type
-        }
         
-        logger.info(f"单视频分析任务完成: {task_id}")
+        # 更新任务完成状态
+        completed_at = datetime.utcnow()
+        analysis_tasks[task_id].update({
+            'status': 'completed',
+            'result': result,
+            'completed_at': completed_at,
+            'processing_time': (completed_at - analysis_tasks[task_id]['started_at']).total_seconds()
+        })
         
     except Exception as e:
-        task["status"] = "failed"
-        task["error_message"] = str(e)
-        logger.error(f"单视频分析任务失败: {task_id}, 错误: {str(e)}")
+        # 处理错误
+        analysis_tasks[task_id].update({
+            'status': 'failed',
+            'error': str(e),
+            'completed_at': datetime.utcnow()
+        })
 
-async def process_complete_account(task_id: str, request: AccountAnalysisRequest):
+async def process_account_analysis(task_id: str, task_data: dict):
     """处理完整账号分析任务"""
     try:
-        task = tasks_storage[task_id]
+        # 更新任务状态
+        analysis_tasks[task_id]['status'] = 'processing'
+        analysis_tasks[task_id]['started_at'] = datetime.utcnow()
         
-        # 模拟分析过程
-        steps = [
-            ("获取账号信息", 10),
-            ("获取视频列表", 20),
-            ("下载视频内容", 40),
-            ("批量分析处理", 70),
-            ("汇总分析结果", 90),
-            ("生成综合报告", 100)
-        ]
+        # 模拟账号分析过程
+        await asyncio.sleep(10)  # 模拟处理时间
         
-        for step_name, progress in steps:
-            task["current_step"] = step_name
-            task["progress"] = progress
-            task["status"] = "processing"
-            
-            # 模拟处理时间
-            await asyncio.sleep(3)
-        
-        # 完成任务
-        task["status"] = "completed"
-        task["completed_at"] = datetime.now()
-        task["results"] = {
-            "account_url": str(request.account_url),
-            "total_videos": min(request.max_videos, 25),  # 模拟找到的视频数
-            "analysis_summary": "这是一个示例账号分析结果",
-            "content_themes": ["教育内容", "生活分享", "技术讲解"],
-            "engagement_analysis": {
-                "average_views": 15000,
-                "average_likes": 800,
-                "engagement_rate": 5.3
+        # 模拟分析结果
+        result = {
+            'account_info': {
+                'username': '示例用户',
+                'platform': task_data['platform'],
+                'url': task_data['account_url'],
+                'follower_count': 10000,
+                'video_count': 50
             },
-            "content_quality_score": 8.5,
-            "recommendations": ["建议增加互动性", "优化发布时间", "丰富内容形式"]
-        }
-        task["metadata"] = {
-            "processing_time": (task["completed_at"] - task["created_at"]).total_seconds(),
-            "analysis_depth": request.analysis_depth,
-            "videos_analyzed": min(request.max_videos, 25)
+            'content_analysis': {
+                'main_topics': ['科技', '教育', '生活'],
+                'content_style': 'educational',
+                'posting_frequency': 'daily',
+                'engagement_rate': 0.085
+            },
+            'video_summaries': [
+                {
+                    'title': '视频1',
+                    'duration': 120,
+                    'views': 5000,
+                    'sentiment': 'positive'
+                }
+            ],
+            'insights': {
+                'growth_trend': 'increasing',
+                'best_performing_content': '教育类视频',
+                'audience_engagement': 'high',
+                'content_recommendations': [
+                    '增加互动性内容',
+                    '保持发布频率',
+                    '关注热门话题'
+                ]
+            },
+            'metrics': {
+                'overall_score': 8.7,
+                'content_quality': 9.1,
+                'audience_engagement': 8.5,
+                'growth_potential': 8.9
+            }
         }
         
-        logger.info(f"完整账号分析任务完成: {task_id}")
+        # 更新任务完成状态
+        completed_at = datetime.utcnow()
+        analysis_tasks[task_id].update({
+            'status': 'completed',
+            'result': result,
+            'completed_at': completed_at,
+            'processing_time': (completed_at - analysis_tasks[task_id]['started_at']).total_seconds()
+        })
         
     except Exception as e:
-        task["status"] = "failed"
-        task["error_message"] = str(e)
-        logger.error(f"完整账号分析任务失败: {task_id}, 错误: {str(e)}")
+        # 处理错误
+        analysis_tasks[task_id].update({
+            'status': 'failed',
+            'error': str(e),
+            'completed_at': datetime.utcnow()
+        })
 
-if __name__ == "__main__":
-    uvicorn.run(
-        "intelligent_analysis_api:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=True,
-        log_level="info"
-    )
+# 管理员接口
+@router.get("/admin/tasks")
+async def get_all_tasks(
+    page: int = 1,
+    limit: int = 50,
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """管理员获取所有分析任务"""
+    if current_user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    
+    tasks = list(analysis_tasks.values())
+    
+    # 状态过滤
+    if status:
+        tasks = [task for task in tasks if task['status'] == status]
+    
+    # 按创建时间倒序排列
+    tasks.sort(key=lambda x: x['created_at'], reverse=True)
+    
+    # 分页
+    start = (page - 1) * limit
+    end = start + limit
+    paginated_tasks = tasks[start:end]
+    
+    return {
+        'tasks': paginated_tasks,
+        'total': len(tasks),
+        'page': page,
+        'limit': limit,
+        'has_more': end < len(tasks)
+    }
+
+@router.delete("/admin/tasks/{task_id}")
+async def delete_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """管理员删除分析任务"""
+    if current_user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    
+    if task_id not in analysis_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    del analysis_tasks[task_id]
+    return {'message': '任务已删除'}
