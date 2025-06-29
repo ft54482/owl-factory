@@ -58,35 +58,22 @@
   }
 }
 
-/* 自定义滚动条样式 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* 自定义样式 */
+.gradient-bg {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
-::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground));
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--primary));
+.glass-effect {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 /* 动画效果 */
-.fade-in {
-  animation: fadeIn 0.3s ease-in-out;
-}
-
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(20px);
   }
   to {
     opacity: 1;
@@ -94,35 +81,24 @@
   }
 }
 
-/* 加载动画 */
-.loading-spinner {
-  animation: spin 1s linear infinite;
+.fade-in {
+  animation: fadeIn 0.5s ease-out;
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
 }
 
-/* 卡片悬停效果 */
-.card-hover {
-  transition: all 0.2s ease-in-out;
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
 }
 
-.card-hover:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
 }
 
-/* 按钮点击效果 */
-.button-press {
-  transition: transform 0.1s ease-in-out;
-}
-
-.button-press:active {
-  transform: scale(0.98);
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
 }
